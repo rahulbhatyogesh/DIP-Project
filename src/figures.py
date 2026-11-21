@@ -210,6 +210,137 @@ def fig_activations(ckpt_path: str | Path, real: np.ndarray, fake: np.ndarray,
     return out
 
 
+def fig_degradation(robustness_jsons: list[Path], out: Path, family: str = "jpeg") -> Path:
+    """AUC and balanced accuracy vs degradation severity, one line per model.
+
+    The centrepiece of the robustness study: it shows at a glance that the HFC
+    margin behaves completely differently under JPEG (which removes high
+    frequencies) than under additive noise (which injects them).
+    """
+    runs = []
+    for p in robustness_jsons:
+        d = json.loads(Path(p).read_text())
+        if family in d.get("results", {}):
+            runs.append(d)
+    if not runs:
+        raise RuntimeError(f"no robustness results contain family {family!r}")
+
+    levels = list(runs[0]["results"][family])
+    xs = range(len(levels))
+
+    fig, axes = plt.subplots(1, 2, figsize=(11, 4))
+    for d in runs:
+        res = d["results"][family]
+        label = d["run"].replace("xception/", "").replace("/identity", "")
+        axes[0].plot(xs, [res[l]["frame"]["auc"] for l in levels], "o-", lw=1.6, label=label)
+        axes[1].plot(
+            xs, [res[l]["frame"]["balanced_accuracy"] for l in levels], "o-", lw=1.6, label=label
+        )
+
+    for ax, name in zip(axes, ("frame AUC", "balanced accuracy")):
+        ax.set_xticks(list(xs))
+        ax.set_xticklabels(levels)
+        ax.set_xlabel(f"{family} severity (increasing ->)")
+        ax.set_ylabel(name)
+        ax.grid(alpha=0.3)
+        ax.legend(fontsize=7)
+    axes[1].axhline(0.5, color="k", ls=":", lw=0.9)
+    axes[1].text(0, 0.505, "chance", fontsize=7, va="bottom")
+    fig.suptitle(f"Robustness to {family}: Celeb-DF-v2 test, identity split", y=1.02)
+    fig.savefig(out)
+    plt.close(fig)
+    return out
+
+
+def fig_pyramid_bands(img: np.ndarray, out: Path, levels: int = 4, jpeg_quality: int = 20) -> Path:
+    """A face decomposed into Laplacian bands, clean vs JPEG.
+
+    Shows *why* multi-scale should help: compression wipes the finest band while
+    coarser bands survive, so a single-band operator loses everything and a
+    pyramid keeps most of its input.
+    """
+    import albumentations as A
+
+    from src.models.hfc import LaplacianPyramidHighPass
+
+    p = LaplacianPyramidHighPass(levels=levels)
+    degraded = A.Compose([A.ImageCompression(quality_range=(jpeg_quality, jpeg_quality), p=1.0)])(
+        image=(img * 255).astype(np.uint8)
+    )["image"].astype(np.float32) / 255.0
+
+    fig, axes = plt.subplots(2, levels + 1, figsize=(2.1 * (levels + 1), 4.6))
+    for row, (im, name) in enumerate([(img, "clean"), (degraded, f"JPEG Q{jpeg_quality}")]):
+        g = p.to_gray(to_tensor(im))
+        bands, _ = p.decompose(g)
+        axes[row, 0].imshow(im)
+        axes[row, 0].set_ylabel(name, fontsize=9)
+        axes[row, 0].set_xticks([]); axes[row, 0].set_yticks([])
+        for col, b in enumerate(bands, start=1):
+            arr = b[0, 0].numpy()
+            _show_signed(axes[row, col], arr, "")
+            if row == 0:
+                axes[row, col].set_title(f"level {col - 1}\n{arr.shape[0]}x{arr.shape[1]}", fontsize=8)
+            axes[row, col].set_xlabel(f"energy {np.abs(arr).mean():.4f}", fontsize=7)
+    fig.suptitle(
+        "Laplacian bands before and after compression -- the finest band is lost first",
+        y=1.03,
+    )
+    fig.savefig(out)
+    plt.close(fig)
+    return out
+
+
+@torch.no_grad()
+def fig_learned_kernels(ckpt_path: str | Path, out: Path) -> Path:
+    """Learned constrained filters beside Eq. (1), with their frequency responses.
+
+    Shows what the network chose to look at once the filter was allowed to move,
+    and confirms every learned filter is still a high-pass (zero at DC).
+    """
+    from src.models.build import model_from_config
+    from src.models.hfc import gaussian_kernel_2d
+
+    ck = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+    model = model_from_config(ck["config"])
+    model.load_state_dict(ck["model"])
+
+    stem = dict(model.named_modules())[model.default_cfg["first_conv"]]
+    if not hasattr(stem.highpass, "constrained_weight"):
+        raise ValueError("checkpoint does not use --hfc-filter learned")
+    learned = stem.highpass.constrained_weight()[:, 0].numpy()
+
+    g = gaussian_kernel_2d(3, 3.0, normalize=True)
+    eq1 = (-g).clone()
+    eq1[1, 1] = 1.0 - g[1, 1]
+    eq1 = (eq1 / eq1[1, 1]).numpy()
+
+    kernels = [("Eq. (1)", eq1)] + [(f"learned {i}", k) for i, k in enumerate(learned)]
+    n = len(kernels)
+    fig, axes = plt.subplots(2, n, figsize=(2.0 * n, 4.6))
+    for col, (name, k) in enumerate(kernels):
+        a = axes[0, col]
+        a.imshow(k, cmap="coolwarm", vmin=-abs(k).max(), vmax=abs(k).max())
+        for (i, j), v in np.ndenumerate(k):
+            a.text(j, i, f"{v:.2f}", ha="center", va="center", fontsize=6)
+        a.set_title(name, fontsize=8)
+        a.axis("off")
+
+        # magnitude response, DC at the centre
+        resp = np.abs(np.fft.fftshift(np.fft.fft2(k, s=(64, 64))))
+        axes[1, col].imshow(resp, cmap="viridis")
+        axes[1, col].axis("off")
+        axes[1, col].set_title(f"|H(f)|, DC={resp[32, 32]:.1e}", fontsize=7)
+
+    fig.suptitle(
+        "Learned filters vs the paper's fixed Eq. (1). Bottom row: magnitude response; "
+        "near-zero DC confirms every filter stayed high-pass.",
+        y=1.03,
+    )
+    fig.savefig(out)
+    plt.close(fig)
+    return out
+
+
 def fig_roc(results: list[dict], out: Path) -> Path:
     """ROC curves for every run, frame level."""
     fig, ax = plt.subplots(figsize=(5.4, 5))
@@ -324,7 +455,8 @@ def build_tables(
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="Generate report figures.")
     ap.add_argument("what", choices=[
-        "stages", "kernels", "realfake", "activations", "roc", "tables", "all",
+        "stages", "kernels", "realfake", "activations", "roc", "tables",
+        "degradation", "bands", "learned", "all",
     ])
     ap.add_argument("--faces-root", default="faces")
     ap.add_argument("--manifest", default="faces/manifest.csv")
@@ -332,6 +464,10 @@ def main(argv=None) -> int:
     ap.add_argument("--results", default="results")
     ap.add_argument("--out", default="report/figures")
     ap.add_argument("--index", type=int, default=0, help="which crop to use")
+    ap.add_argument("--robustness", default="results/robustness",
+                    help="directory of robustness sweep JSONs")
+    ap.add_argument("--family", default="jpeg", help="degradation family to plot")
+    ap.add_argument("--levels", type=int, default=4, help="pyramid levels for 'bands'")
     ap.add_argument("--sigma", type=float, default=3.0)
     ap.add_argument("--kernel-size", type=int, default=3)
     args = ap.parse_args(argv)
@@ -340,10 +476,11 @@ def main(argv=None) -> int:
     out.mkdir(parents=True, exist_ok=True)
     want = {args.what} if args.what != "all" else {
         "stages", "kernels", "realfake", "activations", "tables",
+        "degradation", "bands", "learned",
     }
     made: list[Path] = []
 
-    needs_face = want & {"stages", "kernels", "realfake", "activations"}
+    needs_face = want & {"stages", "kernels", "realfake", "activations", "bands"}
     if needs_face:
         real = load_face(args.faces_root, args.manifest, 0, args.index)
         fake = load_face(args.faces_root, args.manifest, 1, args.index)
@@ -360,6 +497,26 @@ def main(argv=None) -> int:
             made.append(fig_activations(args.ckpt, real, fake, out / "fig_activations.png"))
         else:
             print("skipping activations: pass --ckpt")
+    if "bands" in want:
+        made.append(fig_pyramid_bands(real, out / "fig_pyramid_bands.png", levels=args.levels))
+    if "degradation" in want:
+        js = sorted(Path(args.robustness).glob("*.json"))
+        if js:
+            for fam in ("jpeg", "noise"):
+                try:
+                    made.append(fig_degradation(js, out / f"fig_degradation_{fam}.png", fam))
+                except RuntimeError as exc:
+                    print(f"skipping {fam}: {exc}")
+        else:
+            print(f"skipping degradation: no JSONs in {args.robustness}")
+    if "learned" in want:
+        if args.ckpt:
+            try:
+                made.append(fig_learned_kernels(args.ckpt, out / "fig_learned_kernels.png"))
+            except ValueError as exc:
+                print(f"skipping learned kernels: {exc}")
+        else:
+            print("skipping learned kernels: pass --ckpt of a --hfc-filter learned run")
     if "roc" in want:
         results = [json.loads(p.read_text()) for p in Path(args.results).glob("*.json")]
         made.append(fig_roc(results, out / "fig_roc.png"))
