@@ -11,8 +11,14 @@ __pycache__/
 /faces/
 /data/
 /runs/
-/results/
 /tiny_faces/
+
+# Per-run result JSONs are regenerated output, but RESULTS.md is the hand-kept
+# record of every number and must be tracked. Negation needs the glob form:
+# a bare "/results/" excludes the directory itself and "!" cannot re-include
+# anything inside an excluded directory.
+/results/*
+!/results/RESULTS.md
 *.pt
 *.tar
 *.zip
