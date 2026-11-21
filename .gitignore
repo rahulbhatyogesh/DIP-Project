@@ -34,3 +34,7 @@ __pycache__/
 .idea/
 .DS_Store
 Thumbs.db
+
+# Generated report artifacts (rebuild with report/build_pdf.py)
+/report/*.html
+/report/*.pdf

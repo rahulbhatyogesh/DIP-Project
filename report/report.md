@@ -87,7 +87,7 @@ identity-disjoint data split.
 
 The module's entire DIP content is Eq. (1) of the paper:
 
-$$I_{HFC}(x,y) = I_g(x,y) - \frac{1}{2\pi\sigma^2}\sum_{i,j} I_g(x+i,\,y+j)\,
+$$I_{HFC}(x,y) = I_g(x,y) - \frac{1}{2\pi\sigma^2}\sum_{i,j} I_g(x+i, y+j) 
 e^{-\frac{i^2+j^2}{2\sigma^2}}$$
 
 where $I_g$ is the greyscale image. In words: *the image minus a blurred copy of
@@ -110,7 +110,7 @@ to 1, but a 3×3 *sample* of one does not. Evaluating the printed expression at 
 
 The blur term therefore has gain 0.148, not 1, and
 
-$$I_{HFC} \approx I_g - 0.148\,\overline{I_g} \approx 0.85\,I_g$$
+$$I_{HFC} \approx I_g - 0.148 \overline{I_g} \approx 0.85 I_g$$
 
 which is a *mildly sharpened copy of the image*, not a high-pass. The test is DC
 response: a true high-pass maps a constant image to zero. Measured on a constant image
