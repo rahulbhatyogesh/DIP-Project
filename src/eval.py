@@ -108,7 +108,7 @@ def evaluate(
     all_scores: list[np.ndarray] = []
     all_labels: list[np.ndarray] = []
     all_videos: list[str] = []
-    total_loss, n_batches = 0.0, 0
+    total_loss, n_batches, n_nonfinite = 0.0, 0, 0
     criterion = torch.nn.BCEWithLogitsLoss()
     use_amp = amp and device.type == "cuda"
 
@@ -122,12 +122,20 @@ def evaluate(
         labels = labels.to(device, non_blocking=True)
 
         with torch.amp.autocast(device.type, enabled=use_amp):
-            logits = model(imgs).squeeze(1)
-            loss = criterion(logits.float(), labels)
+            logits = model(imgs)
+        # fp16 can overflow to +/-inf in the forward pass; BCE then returns nan
+        # and poisons the whole average. Clamp to a range where sigmoid is
+        # already saturated, so the clamp changes no prediction.
+        logits = logits.squeeze(1).float().clamp(-30.0, 30.0)
+        loss = criterion(logits, labels)
 
-        total_loss += float(loss)
-        n_batches += 1
-        all_scores.append(torch.sigmoid(logits.float()).cpu().numpy())
+        if torch.isfinite(loss):
+            total_loss += loss.item()
+            n_batches += 1
+        else:
+            n_nonfinite += 1
+
+        all_scores.append(torch.sigmoid(logits).cpu().numpy())
         all_labels.append(labels.cpu().numpy().astype(np.int64))
 
     scores = np.concatenate(all_scores)
@@ -137,6 +145,12 @@ def evaluate(
         "loss": total_loss / max(1, n_batches),
         "frame": binary_metrics(scores, labels),
     }
+    if n_nonfinite:
+        # Surfaced rather than silently averaged away: a non-finite batch means
+        # the forward pass overflowed, which is worth knowing even though the
+        # clamp keeps the metrics usable.
+        out["nonfinite_batches"] = n_nonfinite
+        print(f"  warning: {n_nonfinite} batch(es) had non-finite loss (fp16 overflow)")
     if all_videos:
         v_scores, v_labels = aggregate_by_video(scores, labels, all_videos)
         out["video"] = binary_metrics(v_scores, v_labels)
