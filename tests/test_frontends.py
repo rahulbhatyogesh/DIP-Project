@@ -202,3 +202,27 @@ def test_gradients_reach_learnable_filters():
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v", "--tb=short"]))
+
+
+# --------------------------------------------------------------------------
+# Greyscale control
+# --------------------------------------------------------------------------
+
+def test_gray_passthrough_is_plain_luma():
+    """No filtering at all: the control for 'is the gain spectral or architectural?'"""
+    from src.models.hfc import GrayPassThrough
+
+    g = GrayPassThrough()
+    x = torch.rand(2, 3, 32, 32)
+    expected = (x * torch.tensor([0.299, 0.587, 0.114]).view(1, 3, 1, 1)).sum(1, keepdim=True)
+    assert torch.allclose(g(x), expected, atol=1e-6)
+    assert g.out_channels == 1
+
+
+def test_gray_preserves_dc_unlike_the_high_passes():
+    """The point of the control: it keeps exactly what every high-pass removes."""
+    from src.models.hfc import GrayPassThrough
+
+    flat = torch.full((1, 3, 16, 16), 0.42)
+    assert abs(float(GrayPassThrough()(flat).mean()) - 0.42) < 1e-5
+    assert GaussianHighPass(3, 3.0)(flat).abs().max() < 1e-6

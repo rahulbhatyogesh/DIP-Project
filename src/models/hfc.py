@@ -264,7 +264,34 @@ class ConstrainedHighPass(nn.Module):
         return f"n_filters={self.n_filters}, kernel_size={self.kernel_size}"
 
 
-FILTER_TYPES = ("eq1", "pyramid", "learned")
+class GrayPassThrough(nn.Module):
+    """Unfiltered greyscale -- the control the paper never ran.
+
+    Eq. (1) with the literal 1/(2*pi*sigma^2) factor barely high-passes at all
+    (it leaves ~85% of the DC through, see `gaussian_kernel_2d`), yet it scores
+    within 0.0011 AUC of the proper sum-to-1 high-pass.  That invites an obvious
+    question the paper does not answer: is the improvement due to high-frequency
+    content, or merely to adding a second input branch?
+
+    This front end removes the filtering entirely and passes I_g straight
+    through.  If it matches the HFC module, the benefit is architectural rather
+    than spectral, and the paper's stated mechanism does not hold.
+    """
+
+    def __init__(self, per_channel: bool = False) -> None:
+        super().__init__()
+        self.per_channel = per_channel
+        self.register_buffer("luma", torch.tensor(_LUMA).view(1, 3, 1, 1))
+
+    @property
+    def out_channels(self) -> int:
+        return 3 if self.per_channel else 1
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x if self.per_channel else (x * self.luma).sum(dim=1, keepdim=True)
+
+
+FILTER_TYPES = ("eq1", "pyramid", "learned", "gray")
 
 
 def build_front_end(
@@ -286,6 +313,8 @@ def build_front_end(
         return ConstrainedHighPass(
             n_filters=n_filters, kernel_size=kernel_size, per_channel=per_channel
         )
+    if filter_type == "gray":
+        return GrayPassThrough(per_channel=per_channel)
     raise ValueError(f"filter_type must be one of {FILTER_TYPES}, got {filter_type!r}")
 
 
