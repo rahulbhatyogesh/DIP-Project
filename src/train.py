@@ -33,6 +33,7 @@ from src.config import PAPER
 from src.data.dataset import BalancedBatchSampler, CelebDFFaces
 from src.eval import evaluate, format_metrics
 from src.models.build import MODES, build_model, count_parameters
+from src.models.hfc import FILTER_TYPES
 
 
 def set_seed(seed: int) -> None:
@@ -94,6 +95,15 @@ def main(argv=None) -> int:
         help="use the paper's printed 1/(2*pi*sigma^2) factor instead of a "
              "sum-to-1 kernel (see src/models/hfc.py)",
     )
+    ap.add_argument(
+        "--hfc-filter", default="eq1", choices=list(FILTER_TYPES),
+        help="high-pass front end: 'eq1' is the paper's fixed Gaussian residual; "
+             "'pyramid' is a multi-scale Laplacian band-pass; 'learned' trains N "
+             "filters under the constrained-convolution constraint (centre 1, "
+             "others summing to -1), of which Eq. (1) is one fixed member.",
+    )
+    ap.add_argument("--pyramid-levels", type=int, default=4)
+    ap.add_argument("--n-filters", type=int, default=4)
     # optimisation
     ap.add_argument("--batch-size", type=int, default=PAPER.batch_size)
     ap.add_argument("--lr", type=float, default=PAPER.learning_rate)
@@ -131,6 +141,8 @@ def main(argv=None) -> int:
     out.mkdir(parents=True, exist_ok=True)
 
     run_name = f"{args.backbone}/{args.mode}/{args.protocol}"
+    if args.mode == "hfc" and args.hfc_filter != "eq1":
+        run_name += f"[{args.hfc_filter}]"
     print(f"run={run_name}  device={device}  amp={use_amp}  max_iters={args.max_iters}")
 
     train_loader, val_loader, train_ds = build_loaders(args, device)
@@ -141,6 +153,9 @@ def main(argv=None) -> int:
         kernel_size=args.kernel_size,
         sigma=args.sigma,
         normalize_kernel=not args.literal_eq1,
+        filter_type=args.hfc_filter,
+        pyramid_levels=args.pyramid_levels,
+        n_filters=args.n_filters,
     ).to(device)
     n_params = count_parameters(model)
     expected = PAPER.paper_params_m.get(f"{args.backbone}/{args.mode}")
@@ -162,6 +177,8 @@ def main(argv=None) -> int:
         "batch_size": args.batch_size, "lr": args.lr, "seed": args.seed,
         "sigma": args.sigma, "kernel_size": args.kernel_size,
         "normalize_kernel": not args.literal_eq1, "n_params": n_params,
+        "hfc_filter": args.hfc_filter, "pyramid_levels": args.pyramid_levels,
+        "n_filters": args.n_filters,
         "max_iters": args.max_iters,
     }
 

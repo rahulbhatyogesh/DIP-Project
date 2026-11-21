@@ -40,7 +40,7 @@ from albumentations.pytorch import ToTensorV2
 
 from src.data.dataset import IMAGENET_MEAN, IMAGENET_STD, CelebDFFaces
 from src.eval import evaluate
-from src.models.build import build_model
+from src.models.build import model_from_config
 
 # family -> list of (level_label, albumentations op).  `None` is the clean control.
 DEGRADATIONS: dict[str, list[tuple[str, object]]] = {
@@ -139,12 +139,7 @@ def run_sweep(
     ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
     cfg = ckpt["config"]
 
-    model = build_model(
-        cfg["backbone"], cfg["mode"], pretrained=False,
-        kernel_size=cfg.get("kernel_size", 3),
-        sigma=cfg.get("sigma", 3.0),
-        normalize_kernel=cfg.get("normalize_kernel", True),
-    ).to(device)
+    model = model_from_config(cfg).to(device)
     model.load_state_dict(ckpt["model"])
 
     run = f"{cfg['backbone']}/{cfg['mode']}/{cfg['protocol']}"

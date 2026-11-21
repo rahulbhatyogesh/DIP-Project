@@ -76,8 +76,17 @@ def build_model(
     kernel_size: int = 3,
     sigma: float = 3.0,
     normalize_kernel: bool = True,
+    filter_type: str = "eq1",
+    pyramid_levels: int = 4,
+    n_filters: int = 4,
 ) -> nn.Module:
-    """Create a detector.  Output is a single logit per image (use BCEWithLogitsLoss)."""
+    """Create a detector.  Output is a single logit per image (use BCEWithLogitsLoss).
+
+    `filter_type` selects the high-pass front end inside the HFC module:
+      "eq1"     -- the paper's fixed Gaussian residual (default; reproduces Table IV)
+      "pyramid" -- multi-scale Laplacian band-pass
+      "learned" -- N filters learned under the constrained-convolution constraint
+    """
     if mode not in MODES:
         raise ValueError(f"mode must be one of {MODES}, got {mode!r}")
     timm_name = BACKBONES.get(backbone, backbone)
@@ -87,10 +96,11 @@ def build_model(
     if mode == "none":
         return model
 
-    hp_kwargs = dict(kernel_size=kernel_size, sigma=sigma, normalize_kernel=normalize_kernel)
-
     if mode == "hfc_only":
-        return HFCOnlyWrapper(model, **hp_kwargs)
+        # Per-channel Eq. (1) stacked as RGB, fed to an unmodified backbone.
+        return HFCOnlyWrapper(
+            model, kernel_size=kernel_size, sigma=sigma, normalize_kernel=normalize_kernel
+        )
 
     # mode == "hfc": replace the stem conv in place.
     stem_path = model.default_cfg["first_conv"]
@@ -100,9 +110,38 @@ def build_model(
 
     # C' == the original stem width: in both Xception (bn1 -> act1 -> conv2) and
     # EfficientNet (bn1 -> blocks) the next layer consumes exactly that many channels.
-    hfc = HFCModule(color_conv=stem, out_channels=stem.out_channels, **hp_kwargs)
+    hfc = HFCModule(
+        color_conv=stem,
+        out_channels=stem.out_channels,
+        kernel_size=kernel_size,
+        sigma=sigma,
+        normalize_kernel=normalize_kernel,
+        filter_type=filter_type,
+        pyramid_levels=pyramid_levels,
+        n_filters=n_filters,
+    )
     _set_module(model, stem_path, hfc)
     return model
+
+
+def model_from_config(cfg: dict, *, pretrained: bool = False) -> nn.Module:
+    """Rebuild a model from a checkpoint's saved config.
+
+    Single source of truth for eval and the robustness sweep -- otherwise a new
+    front-end option has to be remembered in three places, and forgetting it
+    shows up as an opaque state_dict mismatch.
+    """
+    return build_model(
+        cfg["backbone"],
+        cfg["mode"],
+        pretrained=pretrained,
+        kernel_size=cfg.get("kernel_size", 3),
+        sigma=cfg.get("sigma", 3.0),
+        normalize_kernel=cfg.get("normalize_kernel", True),
+        filter_type=cfg.get("hfc_filter", "eq1"),
+        pyramid_levels=cfg.get("pyramid_levels", 4),
+        n_filters=cfg.get("n_filters", 4),
+    )
 
 
 def count_parameters(model: nn.Module) -> int:

@@ -107,6 +107,188 @@ class GaussianHighPass(nn.Module):
         return sig - blur
 
 
+class LaplacianPyramidHighPass(nn.Module):
+    """Band-pass decomposition (Burt & Adelson, 1983) in place of Eq. (1)'s single band.
+
+    Motivation.  Eq. (1) extracts ONE narrow high-frequency band -- sigma=3 on a
+    3x3 grid is nearly a box filter.  JPEG quantises high-frequency DCT
+    coefficients hardest, so that single band is the first thing compression
+    destroys.  A pyramid samples several bands, so coarse traces (blending
+    boundaries, warping) survive when the finest ones are gone.
+
+        G[0] = I_g,     G[l+1] = reduce(G[l])
+        L[l] = G[l] - expand(G[l+1])          band-pass at scale l
+
+    `decompose` returns the bands at native resolution plus the coarsest
+    residual, which satisfies perfect reconstruction by construction.  `forward`
+    resamples every band back to the input size and stacks them as channels, so
+    the HFC branch sees `levels` channels instead of one.
+
+    Uses the classic separable binomial kernel [1,4,6,4,1]/16.
+    """
+
+    def __init__(self, levels: int = 4, per_channel: bool = False) -> None:
+        super().__init__()
+        if levels < 1:
+            raise ValueError("levels must be >= 1")
+        self.levels = levels
+        self.per_channel = per_channel
+
+        k1 = torch.tensor([1.0, 4.0, 6.0, 4.0, 1.0]) / 16.0
+        self.register_buffer("kernel", torch.outer(k1, k1).view(1, 1, 5, 5))
+        self.register_buffer("luma", torch.tensor(_LUMA).view(1, 3, 1, 1))
+
+    @property
+    def out_channels(self) -> int:
+        return self.levels * (3 if self.per_channel else 1)
+
+    def _blur(self, x: torch.Tensor, gain: float = 1.0) -> torch.Tensor:
+        c = x.shape[1]
+        w = (self.kernel * gain).expand(c, 1, -1, -1)
+        return F.conv2d(F.pad(x, (2, 2, 2, 2), mode="reflect"), w, groups=c)
+
+    def _reduce(self, x: torch.Tensor) -> torch.Tensor:
+        return self._blur(x)[..., ::2, ::2]
+
+    def _expand(self, x: torch.Tensor, size: tuple[int, int]) -> torch.Tensor:
+        b, c, h, w = x.shape
+        up = x.new_zeros(b, c, h * 2, w * 2)
+        up[..., ::2, ::2] = x                 # zero-insertion upsampling
+        up = self._blur(up, gain=4.0)         # gain 4 restores the mean
+        return up[..., : size[0], : size[1]]
+
+    def decompose(self, g: torch.Tensor) -> tuple[list[torch.Tensor], torch.Tensor]:
+        """Return (band-pass levels at native resolution, coarsest residual)."""
+        bands = []
+        cur = g
+        for _ in range(self.levels):
+            nxt = self._reduce(cur)
+            bands.append(cur - self._expand(nxt, cur.shape[-2:]))
+            cur = nxt
+        return bands, cur
+
+    def reconstruct(self, bands: list[torch.Tensor], residual: torch.Tensor) -> torch.Tensor:
+        """Invert `decompose`. Exact up to floating point -- the pyramid's defining property."""
+        cur = residual
+        for band in reversed(bands):
+            cur = band + self._expand(cur, band.shape[-2:])
+        return cur
+
+    def to_gray(self, x: torch.Tensor) -> torch.Tensor:
+        return x if self.per_channel else (x * self.luma).sum(dim=1, keepdim=True)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        g = self.to_gray(x)
+        bands, _ = self.decompose(g)
+        size = g.shape[-2:]
+        return torch.cat(
+            [F.interpolate(b, size=size, mode="bilinear", align_corners=False) for b in bands],
+            dim=1,
+        )
+
+
+class ConstrainedHighPass(nn.Module):
+    """N LEARNABLE high-pass filters, generalising the paper's single fixed one.
+
+    Written as one convolution kernel, Eq. (1) is `delta - gaussian`, which has
+    centre 0.8804 and off-centre weights summing to -0.8804.  Rescale so the
+    centre is 1 and the off-centre weights sum to exactly -1 -- precisely the
+    constraint Bayar & Stamm (2016) impose to keep a *learned* first layer
+    high-pass, and which the forensics literature has used ever since.
+
+    So the paper hand-picks one member of a family whose members can be learned.
+    This module learns `n_filters` of them:
+
+        centre weight        = 1
+        sum of all others    = -1      (kernel sums to 0, so DC is annihilated)
+
+    The constraint is re-applied inside `forward`, so it holds for any optimiser
+    with no hook in the training loop, and filter 0 is initialised at Eq. (1)
+    exactly -- the paper's configuration is the starting point, and any gain is
+    attributable to learning rather than to a different initialisation.
+    """
+
+    def __init__(
+        self,
+        n_filters: int = 4,
+        kernel_size: int = 3,
+        init_sigmas: tuple[float, ...] = (3.0, 1.0, 2.0, 5.0),
+        per_channel: bool = False,
+    ) -> None:
+        super().__init__()
+        if kernel_size % 2 == 0:
+            raise ValueError("kernel_size must be odd")
+        self.n_filters = n_filters
+        self.kernel_size = kernel_size
+        self.per_channel = per_channel
+
+        c = kernel_size // 2
+        mask = torch.zeros(1, 1, kernel_size, kernel_size)
+        mask[0, 0, c, c] = 1.0
+        self.register_buffer("centre_mask", mask)
+        self.register_buffer("luma", torch.tensor(_LUMA).view(1, 3, 1, 1))
+
+        init = torch.empty(n_filters, 1, kernel_size, kernel_size)
+        for i in range(n_filters):
+            sigma = init_sigmas[i % len(init_sigmas)]
+            g = gaussian_kernel_2d(kernel_size, sigma, normalize=True)
+            k = -g
+            k[c, c] = 1.0 - g[c, c]
+            init[i, 0] = k / k[c, c]          # rescale so the centre is exactly 1
+        self.weight = nn.Parameter(init)
+
+    @property
+    def out_channels(self) -> int:
+        return self.n_filters * (3 if self.per_channel else 1)
+
+    def constrained_weight(self) -> torch.Tensor:
+        """Project the raw parameter onto {centre = 1, sum of others = -1}."""
+        off = self.weight * (1.0 - self.centre_mask)
+        s = off.sum(dim=(-2, -1), keepdim=True)
+        safe = torch.where(s.abs() < 1e-8, torch.full_like(s, 1e-8), s)
+        return -off / safe + self.centre_mask
+
+    def to_gray(self, x: torch.Tensor) -> torch.Tensor:
+        return x if self.per_channel else (x * self.luma).sum(dim=1, keepdim=True)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        g = self.to_gray(x)
+        w = self.constrained_weight()
+        p = self.kernel_size // 2
+        if self.per_channel:                   # apply every filter to every channel
+            w = w.repeat(3, 1, 1, 1)
+            return F.conv2d(F.pad(g, (p, p, p, p), mode="reflect"), w, groups=3)
+        return F.conv2d(F.pad(g, (p, p, p, p), mode="reflect"), w)
+
+    def extra_repr(self) -> str:
+        return f"n_filters={self.n_filters}, kernel_size={self.kernel_size}"
+
+
+FILTER_TYPES = ("eq1", "pyramid", "learned")
+
+
+def build_front_end(
+    filter_type: str = "eq1",
+    *,
+    kernel_size: int = 3,
+    sigma: float = 3.0,
+    normalize_kernel: bool = True,
+    pyramid_levels: int = 4,
+    n_filters: int = 4,
+    per_channel: bool = False,
+) -> nn.Module:
+    """Pick the high-pass front end. 'eq1' is the paper, unchanged."""
+    if filter_type == "eq1":
+        return GaussianHighPass(kernel_size, sigma, normalize_kernel, per_channel)
+    if filter_type == "pyramid":
+        return LaplacianPyramidHighPass(levels=pyramid_levels, per_channel=per_channel)
+    if filter_type == "learned":
+        return ConstrainedHighPass(
+            n_filters=n_filters, kernel_size=kernel_size, per_channel=per_channel
+        )
+    raise ValueError(f"filter_type must be one of {FILTER_TYPES}, got {filter_type!r}")
+
+
 class HFCModule(nn.Module):
     """Replacement for a backbone's first convolution (Fig. 2 of the paper).
 
@@ -131,9 +313,13 @@ class HFCModule(nn.Module):
         normalize_kernel: bool = True,
         use_color: bool = True,
         act_layer: type[nn.Module] = nn.ReLU,
+        filter_type: str = "eq1",
+        pyramid_levels: int = 4,
+        n_filters: int = 4,
     ) -> None:
         super().__init__()
         self.use_color = use_color
+        self.filter_type = filter_type
 
         c_color = color_conv.out_channels
         c_hfc = c_color // 3  # floor(C/3)
@@ -141,22 +327,26 @@ class HFCModule(nn.Module):
             raise ValueError(f"colour branch too narrow ({c_color}) for floor(C/3)")
         self.c_color, self.c_hfc = c_color, c_hfc
 
-        self.highpass = GaussianHighPass(
+        self.highpass = build_front_end(
+            filter_type,
             kernel_size=kernel_size,
             sigma=sigma,
             normalize_kernel=normalize_kernel,
+            pyramid_levels=pyramid_levels,
+            n_filters=n_filters,
             per_channel=False,
         )
+        n_in = self.highpass.out_channels
 
         # Colour branch: reuse the backbone's conv so pretrained weights carry over.
         self.color_conv = color_conv if use_color else None
 
         # HFC branch.  Mirrors the colour conv's geometry so the two branches
         # come out at identical spatial resolution and can be concatenated.
-        self.hfc_bn_in = nn.BatchNorm2d(1)
+        self.hfc_bn_in = nn.BatchNorm2d(n_in)
         self.hfc_act_in = act_layer(inplace=True)
         self.hfc_conv = nn.Conv2d(
-            1,
+            n_in,
             c_hfc,
             kernel_size=color_conv.kernel_size,
             stride=color_conv.stride,
@@ -180,4 +370,7 @@ class HFCModule(nn.Module):
         return self.fuse(h)
 
     def extra_repr(self) -> str:
-        return f"C={self.c_color}, floor(C/3)={self.c_hfc}, use_color={self.use_color}"
+        return (
+            f"C={self.c_color}, floor(C/3)={self.c_hfc}, "
+            f"use_color={self.use_color}, filter={self.filter_type}"
+        )

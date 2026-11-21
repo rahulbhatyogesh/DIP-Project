@@ -23,7 +23,7 @@ import torch
 from torch.utils.data import DataLoader
 
 from src.data.dataset import CelebDFFaces
-from src.models.build import build_model
+from src.models.build import model_from_config
 
 
 def binary_metrics(scores: np.ndarray, labels: np.ndarray, threshold: float = 0.5) -> dict:
@@ -171,7 +171,7 @@ def main(argv=None) -> int:
     ckpt = torch.load(args.ckpt, map_location=device, weights_only=False)
     cfg = ckpt["config"]
 
-    model = build_model(cfg["backbone"], cfg["mode"], pretrained=False).to(device)
+    model = model_from_config(cfg).to(device)
     model.load_state_dict(ckpt["model"])
 
     ds = CelebDFFaces(
