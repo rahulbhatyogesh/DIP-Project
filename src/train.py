@@ -82,7 +82,8 @@ def main(argv=None) -> int:
     ap.add_argument("--faces-root", required=True)
     ap.add_argument("--manifest", required=True)
     ap.add_argument("--splits", required=True)
-    ap.add_argument("--protocol", default="identity", choices=["random", "identity"])
+    ap.add_argument("--protocol", default="identity",
+                    choices=["random", "identity", "identity_strict"])
     ap.add_argument("--image-size", type=int, default=PAPER.image_size)
     # model
     ap.add_argument("--backbone", default="xception")

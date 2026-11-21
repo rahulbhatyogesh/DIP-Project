@@ -59,7 +59,7 @@ def build_transforms(train: bool, size: int = 224, normalize: bool = True) -> A.
 class CelebDFFaces(Dataset):
     """Face crops for one (protocol, partition) pair.
 
-    protocol : "random" | "identity"
+    protocol : "random" | "identity" | "identity_strict"
     part     : "train"  | "val" | "test"
     """
 

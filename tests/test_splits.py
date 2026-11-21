@@ -21,9 +21,13 @@ from src.data.splits import (  # noqa: E402
     FAKE,
     REAL,
     build_splits,
+    build_splits_from_manifest,
+    identity_components,
     make_identity_split,
     make_random_split,
+    make_strict_identity_split,
     parse_video,
+    records_from_manifest,
     scan_dataset,
     summarise,
 )
@@ -233,9 +237,134 @@ def test_build_splits_writes_usable_manifest(fake_root, tmp_path):
     m = build_splits(fake_root, out)
     assert out.exists()
     assert (m["n_real"], m["n_fake"], m["n_identities"]) == (N_REAL, N_FAKE, N_IDENTITIES)
-    assert set(m["splits"]) == {"random", "identity"}
+    assert {"random", "identity"} <= set(m["splits"])
     assert "identity overlap" in summarise(m)
 
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v", "--tb=short"]))
+
+
+# --------------------------------------------------------------------------
+# Strict component split (our extension, not the paper's protocol)
+# --------------------------------------------------------------------------
+
+@pytest.fixture(scope="module")
+def clustered_root(tmp_path_factory) -> Path:
+    """A tree whose identity graph has three disjoint components.
+
+    Celeb-DF-v2 really does split into components of size [38, 10, 10, 1], but a
+    uniformly random pairing collapses into one, so the main fixture cannot
+    exercise the strict split.
+    """
+    root = tmp_path_factory.mktemp("clustered")
+    (root / "Celeb-real").mkdir()
+    (root / "Celeb-synthesis").mkdir()
+
+    clusters = [list(range(0, 20)), list(range(20, 32)), list(range(32, 40))]
+    for cluster in clusters:
+        for i in cluster:
+            for k in range(5):
+                (root / "Celeb-real" / f"id{i}_{k:04d}.mp4").touch()
+        # forgeries only ever pair identities inside the same cluster
+        for a in cluster:
+            for b in cluster:
+                if a != b:
+                    (root / "Celeb-synthesis" / f"id{a}_id{b}_0000.mp4").touch()
+    return root
+
+
+def test_identity_graph_finds_the_components(clustered_root):
+    comps = identity_components(scan_dataset(clustered_root))
+    assert sorted(len(c) for c in comps) == [8, 12, 20]
+
+
+def test_strict_split_isolates_every_identity_in_both_roles(clustered_root):
+    """The whole point: no identity appears in two partitions as source OR target."""
+    recs = scan_dataset(clustered_root)
+    splits = make_strict_identity_split(recs)
+    part_of = {v: p for p, vids in splits.items() for v in vids}
+
+    seen: dict[str, set[str]] = {}
+    for r in recs:
+        for ident in (r.source_id, r.target_id):
+            if ident:
+                seen.setdefault(ident, set()).add(part_of[r.video_id])
+    scattered = {i: p for i, p in seen.items() if len(p) > 1}
+    assert not scattered, f"identities spanning partitions: {scattered}"
+
+
+def test_strict_split_is_stricter_than_the_paper_protocol(clustered_root):
+    """Contrast: the paper's per-identity split DOES leak the secondary identity."""
+    recs = scan_dataset(clustered_root)
+    loose = make_identity_split(recs, key="source")
+    part_of = {v: p for p, vids in loose.items() for v in vids}
+
+    seen: dict[str, set[str]] = {}
+    for r in recs:
+        for ident in (r.source_id, r.target_id):
+            if ident:
+                seen.setdefault(ident, set()).add(part_of[r.video_id])
+    assert any(len(p) > 1 for p in seen.values()), \
+        "expected target-identity leakage under source keying"
+
+
+def test_strict_split_drops_nothing(clustered_root):
+    recs = scan_dataset(clustered_root)
+    assigned = [v for vids in make_strict_identity_split(recs).values() for v in vids]
+    assert sorted(assigned) == sorted(r.video_id for r in recs)
+
+
+# --------------------------------------------------------------------------
+# Rebuilding splits from a manifest (no source video needed)
+# --------------------------------------------------------------------------
+
+def test_records_from_manifest_round_trips(fake_root, tmp_path):
+    import csv as _csv
+
+    recs = scan_dataset(fake_root)
+    man = tmp_path / "manifest.csv"
+    with man.open("w", newline="", encoding="utf-8") as fh:
+        w = _csv.DictWriter(fh, fieldnames=[
+            "video_id", "folder", "label", "source_id", "target_id",
+            "frame_idx", "rel_path",
+        ])
+        w.writeheader()
+        for r in recs:
+            for f in range(2):          # two rows per video, to test dedup
+                w.writerow({
+                    "video_id": r.video_id, "folder": r.folder, "label": r.label,
+                    "source_id": r.source_id or "", "target_id": r.target_id or "",
+                    "frame_idx": f, "rel_path": f"{r.folder}/{r.video_id}/{f}.jpg",
+                })
+
+    rebuilt = records_from_manifest(man)
+    assert len(rebuilt) == len(recs)
+    assert {r.video_id for r in rebuilt} == {r.video_id for r in recs}
+    by_id = {r.video_id: r for r in rebuilt}
+    for r in recs:
+        assert by_id[r.video_id].label == r.label
+        assert by_id[r.video_id].source_id == r.source_id
+
+    m = build_splits_from_manifest(man, tmp_path / "s.json")
+    assert {"random", "identity"} <= set(m["splits"])
+    assert m["n_real"] == N_REAL and m["n_fake"] == N_FAKE
+
+
+def test_build_splits_skips_strict_when_infeasible(fake_root, tmp_path):
+    """Uniform random pairing gives one giant component -- no strict split exists."""
+    m = build_splits(fake_root, tmp_path / "s.json")
+    assert set(m["splits"]) == {"random", "identity"}
+    assert "identity_strict_unavailable" in m
+    assert "component" in m["identity_strict_unavailable"]
+
+
+def test_build_splits_emits_strict_when_feasible(clustered_root, tmp_path):
+    m = build_splits(clustered_root, tmp_path / "s.json")
+    assert set(m["splits"]) == {"random", "identity", "identity_strict"}
+    assert "identity_strict_unavailable" not in m
+
+
+def test_strict_split_raises_rather_than_emptying_a_partition(fake_root):
+    with pytest.raises(ValueError, match="component"):
+        make_strict_identity_split(scan_dataset(fake_root))

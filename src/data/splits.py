@@ -171,6 +171,22 @@ def make_identity_split(
     }
 
 
+
+def _add_strict_if_feasible(manifest: dict, records: list[VideoRecord], seed: int) -> None:
+    """Attach the strict component split when the identity graph permits one.
+
+    Stricter than the paper: whole connected components move together, so no
+    identity appears in two partitions in ANY role. This removes the residual
+    target-identity leakage that `make_identity_split` allows. It is only
+    feasible when the graph has several components -- Celeb-DF-v2 has four, of
+    sizes [38, 10, 10, 1] -- so it is skipped rather than fatal when it is not.
+    """
+    try:
+        manifest["splits"]["identity_strict"] = make_strict_identity_split(records, seed=seed)
+    except ValueError as exc:
+        manifest["identity_strict_unavailable"] = str(exc)
+
+
 def build_splits(
     root: str | Path,
     out_path: str | Path,
@@ -200,6 +216,7 @@ def build_splits(
         },
         "videos": {r.video_id: asdict(r) for r in records},
     }
+    _add_strict_if_feasible(manifest, records, seed)
 
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -244,7 +261,7 @@ def make_strict_identity_split(
         assigned[part] |= comp
 
     part_of_ident = {i: p for p, idents in assigned.items() for i in idents}
-    out: dict[str, list[str]] = defaultdict(list)
+    out: dict[str, list[str]] = {p: [] for p in targets}   # always all three keys
     for r in records:
         idents = [i for i in (r.source_id, r.target_id) if i]
         parts = {part_of_ident[i] for i in idents if i in part_of_ident}
@@ -253,6 +270,18 @@ def make_strict_identity_split(
         elif not parts:
             out["train"].append(r.video_id)        # YouTube-real, no identity
         # len(parts) > 1 cannot happen: linked identities share a component.
+
+    empty = [p for p, v in out.items() if not v]
+    if empty:
+        # One component can swallow everything -- on a densely linked identity
+        # graph there is no feasible strict split at all. Fail loudly rather than
+        # hand back a partition nobody can train or evaluate on.
+        raise ValueError(
+            f"strict identity split left {empty} empty: the identity graph has "
+            f"{len(comps)} component(s) of sizes {[len(c) for c in comps]}, which "
+            "cannot be divided into the requested fractions. Use "
+            "make_identity_split (the paper's protocol) instead."
+        )
     return {k: sorted(v) for k, v in out.items()}
 
 
@@ -348,6 +377,46 @@ def describe_identity_graph(root: str | Path, include_youtube_real: bool = False
             "   components to partitions."
         )
     return "\n".join(lines)
+
+
+def build_splits_from_manifest(
+    manifest_csv: str | Path,
+    out_path: str | Path,
+    *,
+    seed: int = 42,
+    identity_key: str = "source",
+) -> dict:
+    """Build all three protocols from an extraction manifest.
+
+    Lets splits be regenerated wherever the crops already are -- a Colab session,
+    say -- without the 10 GB of source video. Useful when a new protocol is added
+    after the crops have been published.
+    """
+    records = records_from_manifest(manifest_csv)
+    label_of = {r.video_id: r.label for r in records}
+    ident_of = {r.video_id: r.identity_key(identity_key) for r in records}
+
+    manifest = {
+        "seed": seed,
+        "identity_key": identity_key,
+        "source": str(manifest_csv),
+        "n_videos": len(records),
+        "n_real": sum(1 for r in records if r.label == REAL),
+        "n_fake": sum(1 for r in records if r.label == FAKE),
+        "n_identities": len(set(ident_of.values())),
+        "labels": label_of,
+        "identities": ident_of,
+        "splits": {
+            "random": make_random_split(records, seed=seed),
+            "identity": make_identity_split(records, seed=seed, key=identity_key),
+        },
+        "videos": {r.video_id: asdict(r) for r in records},
+    }
+    _add_strict_if_feasible(manifest, records, seed)
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(json.dumps(manifest, indent=2))
+    return manifest
 
 
 def summarise(manifest: dict) -> str:
