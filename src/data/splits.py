@@ -1,0 +1,231 @@
+"""Train/val/test splits for Celeb-DF-v2 -- random (by video) vs identity (by subject).
+
+This is what produces the paper's Table II result: the same model scores ~6-8
+accuracy points higher under a random split purely because subject identities
+leak across the partitions.
+
+Filename conventions
+--------------------
+    Celeb-real/id{J}_{K}.mp4             real, subject J
+    Celeb-synthesis/id{I}_id{J}_{K}.mp4  fake, subject I's face rendered onto
+                                         subject J's video K
+    YouTube-real/{N}.mp4                 real, one unique ordinary subject each
+
+That id{J}_{K}.mp4 is itself a valid Celeb-real filename is what tells us J
+donates the video/background and I donates the face.
+
+Identity-split rule
+-------------------
+A fake involves two subjects, but they need NOT land in the same partition.
+Each video is keyed to exactly ONE identity and follows that identity:
+
+    person A's real videos and A's fakes always travel together,
+    and person B is assigned independently of whether B ever appeared with A.
+
+Nothing is dropped and every subject's own footage stays on one side of the
+split.  The key defaults to the SOURCE identity -- the face actually rendered
+into the frame, hence the one carrying the artifacts being classified.
+Passing key="target" exposes the alternative for a sensitivity check.
+"""
+
+from __future__ import annotations
+
+import json
+import random
+import re
+from collections import Counter, defaultdict
+from dataclasses import asdict, dataclass
+from pathlib import Path
+
+REAL, FAKE = 0, 1
+
+FOLDER_REAL = "Celeb-real"
+FOLDER_FAKE = "Celeb-synthesis"
+FOLDER_YT = "YouTube-real"
+
+_RE_REAL = re.compile(r"^id(\d+)_(\d+)$")
+_RE_FAKE = re.compile(r"^id(\d+)_id(\d+)_(\d+)$")
+
+# Paper, Sec. V-A: "using 21% of the identities for testing and 19% for validation".
+DEFAULT_FRACS = {"train": 0.60, "val": 0.19, "test": 0.21}
+
+
+@dataclass(frozen=True)
+class VideoRecord:
+    rel_path: str
+    video_id: str
+    folder: str
+    label: int
+    source_id: str | None   # whose face is rendered
+    target_id: str | None   # whose video/background is used
+
+    def identity_key(self, key: str = "source") -> str:
+        if key not in ("source", "target"):
+            raise ValueError("key must be 'source' or 'target'")
+        chosen = self.source_id if key == "source" else self.target_id
+        # Reals carry a single identity; YouTube-real videos are their own subject.
+        return chosen or self.source_id or self.target_id or f"yt_{self.video_id}"
+
+
+def parse_video(rel_path: str) -> VideoRecord:
+    """Parse one Celeb-DF path like 'Celeb-synthesis/id0_id16_0000.mp4'."""
+    p = Path(rel_path.replace("\\", "/"))
+    folder, stem = p.parent.name, p.stem
+
+    if folder == FOLDER_FAKE:
+        m = _RE_FAKE.match(stem)
+        if not m:
+            raise ValueError(f"unparseable fake filename: {rel_path}")
+        src, tgt, _ = m.groups()
+        return VideoRecord(rel_path, stem, folder, FAKE, f"id{src}", f"id{tgt}")
+
+    if folder == FOLDER_REAL:
+        m = _RE_REAL.match(stem)
+        if not m:
+            raise ValueError(f"unparseable real filename: {rel_path}")
+        subj, _ = m.groups()
+        return VideoRecord(rel_path, stem, folder, REAL, f"id{subj}", f"id{subj}")
+
+    if folder == FOLDER_YT:
+        # No id prefix, but 300 videos / 300 subjects => each file is its own identity.
+        return VideoRecord(rel_path, stem, folder, REAL, None, None)
+
+    raise ValueError(f"unexpected folder {folder!r} in {rel_path}")
+
+
+def scan_dataset(root: str | Path, include_youtube_real: bool = False) -> list[VideoRecord]:
+    """Walk a Celeb-DF-v2 root and parse every .mp4.
+
+    YouTube-real is EXCLUDED by default.  No fakes are ever generated from those
+    300 subjects and the footage comes from a visibly different source
+    distribution, so including it lets a model learn "this source bucket => real"
+    without learning any forgery artifact -- the same shortcut the paper attacks
+    in Sec. V-A, keyed on source domain instead of identity.  Excluding it also
+    reproduces Table I's count of 590 real videos.
+    """
+    root = Path(root)
+    folders = [FOLDER_REAL, FOLDER_FAKE] + ([FOLDER_YT] if include_youtube_real else [])
+    records: list[VideoRecord] = []
+    for folder in folders:
+        d = root / folder
+        if not d.is_dir():
+            raise FileNotFoundError(f"missing expected folder: {d}")
+        for mp4 in sorted(d.glob("*.mp4")):
+            records.append(parse_video(f"{folder}/{mp4.name}"))
+    if not records:
+        raise RuntimeError(f"no videos found under {root}")
+    return records
+
+
+def _partition(items: list, fracs: dict[str, float], rng: random.Random) -> dict[str, list]:
+    """Shuffle and cut into train/val/test by fraction, losing nothing."""
+    items = list(items)
+    rng.shuffle(items)
+    n = len(items)
+    n_val = round(n * fracs["val"])
+    n_test = round(n * fracs["test"])
+    return {
+        "test": items[:n_test],
+        "val": items[n_test : n_test + n_val],
+        "train": items[n_test + n_val :],
+    }
+
+
+def make_random_split(
+    records: list[VideoRecord],
+    fracs: dict[str, float] | None = None,
+    seed: int = 42,
+) -> dict[str, list[str]]:
+    """Split by VIDEO, stratified by label.  The paper's (leaky) baseline protocol."""
+    fracs = fracs or DEFAULT_FRACS
+    rng = random.Random(seed)
+    out: dict[str, list[str]] = defaultdict(list)
+    by_label = defaultdict(list)
+    for r in records:
+        by_label[r.label].append(r.video_id)
+    for label in sorted(by_label):
+        for part, vids in _partition(by_label[label], fracs, rng).items():
+            out[part].extend(vids)
+    return {k: sorted(v) for k, v in out.items()}
+
+
+def make_identity_split(
+    records: list[VideoRecord],
+    fracs: dict[str, float] | None = None,
+    seed: int = 42,
+    key: str = "source",
+) -> dict[str, list[str]]:
+    """Split by SUBJECT.  Every video follows its key identity; nothing is dropped."""
+    fracs = fracs or DEFAULT_FRACS
+    rng = random.Random(seed)
+
+    by_identity: dict[str, list[str]] = defaultdict(list)
+    for r in records:
+        by_identity[r.identity_key(key)].append(r.video_id)
+
+    identities = sorted(by_identity)
+    parts = _partition(identities, fracs, rng)
+    return {
+        part: sorted(v for ident in idents for v in by_identity[ident])
+        for part, idents in parts.items()
+    }
+
+
+def build_splits(
+    root: str | Path,
+    out_path: str | Path,
+    *,
+    seed: int = 42,
+    identity_key: str = "source",
+    include_youtube_real: bool = False,
+) -> dict:
+    """Produce both protocols in one manifest JSON."""
+    records = scan_dataset(root, include_youtube_real)
+    label_of = {r.video_id: r.label for r in records}
+    ident_of = {r.video_id: r.identity_key(identity_key) for r in records}
+
+    manifest = {
+        "seed": seed,
+        "identity_key": identity_key,
+        "include_youtube_real": include_youtube_real,
+        "n_videos": len(records),
+        "n_real": sum(1 for r in records if r.label == REAL),
+        "n_fake": sum(1 for r in records if r.label == FAKE),
+        "n_identities": len(set(ident_of.values())),
+        "labels": label_of,
+        "identities": ident_of,
+        "splits": {
+            "random": make_random_split(records, seed=seed),
+            "identity": make_identity_split(records, seed=seed, key=identity_key),
+        },
+        "videos": {r.video_id: asdict(r) for r in records},
+    }
+
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(json.dumps(manifest, indent=2))
+    return manifest
+
+
+def summarise(manifest: dict) -> str:
+    """Human-readable split summary, including the identity-leakage contrast."""
+    lines = [
+        f"videos={manifest['n_videos']}  real={manifest['n_real']}  fake={manifest['n_fake']}"
+        f"  identities={manifest['n_identities']}  key={manifest['identity_key']}",
+    ]
+    labels, idents = manifest["labels"], manifest["identities"]
+    for proto, splits in manifest["splits"].items():
+        lines.append(f"  [{proto}]")
+        seen: dict[str, set] = {}
+        for part in ("train", "val", "test"):
+            vids = splits[part]
+            c = Counter(labels[v] for v in vids)
+            seen[part] = {idents[v] for v in vids}
+            pct = 100 * len(vids) / manifest["n_videos"]
+            lines.append(
+                f"    {part:5s} videos={len(vids):5d} ({pct:4.1f}%)  "
+                f"real={c[REAL]:4d} fake={c[FAKE]:5d}  identities={len(seen[part]):3d}"
+            )
+        overlap = seen["train"] & seen["test"]
+        lines.append(f"    train/test identity overlap: {len(overlap)}")
+    return "\n".join(lines)

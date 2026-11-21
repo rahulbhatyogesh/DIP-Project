@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ipynb_checkpoints/
+*.egg-info/
+
+# Data and training artifacts -- these live on Kaggle/Colab, never in git.
+# Anchored with a leading slash so they match only at the repo root and do
+# NOT swallow src/data/.
+/faces/
+/data/
+/runs/
+/results/
+/tiny_faces/
+*.pt
+*.tar
+*.zip
+*.mp4
+/splits.json
+/manifest.csv
+
+# Papers (keep the repo lean; they are not ours to redistribute)
+*.pdf
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
