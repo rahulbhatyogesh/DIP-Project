@@ -20,8 +20,10 @@ figure comparable to the paper; raw accuracy is dominated by the fake class
 |---|---|---|---|---|---|---|
 | xception | none | random | 0.9488 | 0.9633 | 0.9947 | 0.9951 |
 | xception | hfc | random | 0.9433 | 0.9663 | 0.9936 | 0.9963 |
+| xception | **hfc_only** | random | **0.9602** | 0.9431 | 0.9937 | 0.9901 |
 | xception | none | identity | 0.9193 | 0.8834 | 0.9779 | 0.9669 |
-| xception | hfc | identity | 0.9163 | 0.9064 | **0.9868** | 0.9728 |
+| xception | hfc | identity | 0.9163 | 0.9064 | 0.9868 | 0.9728 |
+| xception | **hfc_only** | identity | **0.9382** | 0.8750 | **0.9897** | 0.9665 |
 | efficientnet_b4 | none | identity | 0.9376 | 0.9056 | 0.9901 | 0.9756 |
 | efficientnet_b4 | hfc | identity | 0.9032 | 0.9246 | 0.9856 | 0.9782 |
 
@@ -87,6 +89,7 @@ Likely reason the random split shows nothing: our baseline is already at
 
 | front end | bal_acc | frame AUC | video bal_acc | video AUC | params |
 |---|---|---|---|---|---|
+| **hfc_only** (no colour branch) | **0.9382** | **0.9897** | 0.9564 | 0.9978 | 20.809 M |
 | none (no HFC branch) | 0.9193 | 0.9779 | 0.9457 | 0.9884 | 20.809 M |
 | **learned** (constrained, N=4) | **0.9340** | **0.9882** | 0.9557 | 0.9959 | 20.822 M |
 | **pyramid** (Laplacian, 4 levels) | **0.9276** | **0.9879** | 0.9579 | 0.9928 | 20.821 M |
@@ -106,6 +109,15 @@ pyramid +0.0113 bal_acc / +0.0011 AUC. Cost: ~300 parameters.
    should not be leaned on. The balanced-accuracy gaps (+0.011, +0.018) are more
    substantial, and both independent modifications moving both metrics the same
    way is worth more than either result alone.
+
+**`hfc_only` wins outright, reversing the paper's ablation ordering.** Discarding
+colour entirely and feeding the backbone nothing but per-channel high-pass residuals
+beats every other configuration on both splits and both metrics (identity: 0.9382 /
+0.9897). The paper reports `hfc_only` as its *worst* setup on both splits. This
+refutes the "maybe it is just the extra branch" reading -- `hfc_only` has no second
+branch and still wins -- and says high-frequency content is not merely sufficient here
+but better than colour. Keeping the colour branch alongside appears to dilute it:
+hfc 0.9868 < hfc_only 0.9897.
 
 **The literal-Eq.(1) result is the awkward one for the paper.** A filter that
 leaves ~85% of the DC through — barely a high-pass at all — reaches 0.9857 AUC

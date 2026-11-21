@@ -37,9 +37,11 @@ HFC gain reproduces on XceptionNet (+0.0089 AUC, larger than the paper's +0.0059
 (4) The module is robust to JPEG — its margin *triples* at Q10 — but **fragile to
 additive noise**, inverting to −0.0412 at σ=10; we give a spectral explanation.
 (5) Both of our generalisations beat the paper's fixed filter for ~300 extra
-parameters. (6) A filter that barely high-passes at all performs within 0.0011 AUC of
-the proper one, which questions whether the paper's stated mechanism explains its own
-result.
+parameters. (6) We **reverse the paper's ablation ordering**: its `hfc_only` setup,
+which discards colour entirely, is the *worst* of three in the paper but the *best*
+configuration in our experiments on both splits (0.9897 AUC on identity) — supporting
+the paper's spectral hypothesis more strongly than its own data does, while
+contradicting the parallel-fusion architecture it proposes.
 
 ---
 
@@ -365,6 +367,22 @@ in mind.
 | Xception | identity | 0.9779 | **0.9868** | **+0.0089** | +0.0059 |
 | EfficientNet-B4 | identity | 0.9901 | 0.9856 | **−0.0045** | +0.0026 |
 
+The paper's third setup, `hfc_only` — colour discarded entirely, the backbone fed
+nothing but per-channel high-pass residuals — behaves very differently in our hands:
+
+| setup, Xception | balanced accuracy | AUC | paper acc | paper AUC |
+|---|---|---|---|---|
+| none, identity | 0.9193 | 0.9779 | 0.8834 | 0.9669 |
+| hfc, identity | 0.9163 | 0.9868 | 0.9064 | 0.9728 |
+| **hfc_only, identity** | **0.9382** | **0.9897** | *0.8750* | *0.9665* |
+| none, random | 0.9488 | 0.9947 | 0.9633 | 0.9951 |
+| hfc, random | 0.9433 | 0.9936 | 0.9663 | 0.9963 |
+| **hfc_only, random** | **0.9602** | 0.9937 | *0.9431* | *0.9901* |
+
+**`hfc_only` is the best configuration in our experiments, on both splits.** The paper
+reports it as the worst of its three. We therefore reverse the paper's ablation
+ordering entirely: it finds hfc > none > hfc_only; we find hfc_only > none ≈ hfc.
+
 **Partially reproduced.** On XceptionNet the gain is real and *larger* than the paper's.
 On the random split there is no gain — but neither is there in the paper (+0.0012),
 and our baseline sits at 0.9947 AUC, effectively at ceiling.
@@ -383,6 +401,7 @@ Xception, identity split:
 
 | front end | balanced accuracy | AUC | parameters |
 |---|---|---|---|
+| **hfc_only** (no colour branch) | **0.9382** | **0.9897** | 20.809 M |
 | none | 0.9193 | 0.9779 | 20.809 M |
 | **learned (N=4)** | **0.9340** | **0.9882** | 20.822 M |
 | **pyramid (4 levels)** | **0.9276** | **0.9879** | 20.821 M |
@@ -390,7 +409,8 @@ Xception, identity split:
 | literal Eq. (1) | 0.9141 | 0.9857 | 20.821 M |
 
 Both generalisations beat the paper's fixed filter on both metrics for ~300 extra
-parameters. Note that `eq1` scores *below* the no-HFC baseline on balanced accuracy
+parameters — though `hfc_only`, which simply deletes the colour branch, beats all of
+them and costs nothing at all. Note that `eq1` scores *below* the no-HFC baseline on balanced accuracy
 while beating it on AUC — it improves ranking at the cost of calibration — and both our
 variants land above the baseline on both.
 
@@ -403,23 +423,36 @@ metrics the same direction is stronger evidence than either alone.
 
 | variant | AUC |
 |---|---|
-| no HFC branch | 0.9779 |
-| branch fed the **literal** Eq. (1) — barely a high-pass | 0.9857 |
-| branch fed a proper high-pass | 0.9868 |
-| *branch fed unfiltered greyscale* | *[pending]* |
+| no HFC branch (colour only) | 0.9779 |
+| colour + branch fed the **literal** Eq. (1) — barely a high-pass | 0.9857 |
+| colour + branch fed a proper high-pass | 0.9868 |
+| **high-pass only, colour discarded** | **0.9897** |
+| *colour + branch fed unfiltered greyscale* | *[pending]* |
 
 The literal form leaves ~85% of the DC through, yet lands within **0.0011 AUC** of the
 proper high-pass, while both beat the baseline by ~0.008. If the mechanism were really
 about high-frequency content, that gap should be far larger.
 
-`hfc_only` sharpens the puzzle from the other side: discarding colour entirely and
-feeding the backbone nothing but per-channel high-pass residuals reached validation AUC
-0.9856, matching colour+HFC's 0.9855 — where the paper reports `hfc_only` as clearly its
-worst setup.
+But `hfc_only` points the other way, and decisively. Discarding colour entirely and
+feeding the backbone nothing but per-channel high-pass residuals gives the **best
+result of any configuration we trained** — 0.9897 AUC, beating colour+HFC's 0.9868 and
+both of our own extensions. This rules out the economical explanation that the benefit
+comes from simply having a second input branch, because `hfc_only` has no second
+branch.
 
-The two findings are reconcilable if **colour and high-frequency content carry largely
-redundant evidence** on this dataset: either alone suffices, and adding a second branch
-of either kind helps slightly. The greyscale control decides it.
+Taken together the three ablations give a consistent picture:
+
+1. **High-frequency content carries the signal.** `hfc_only` is best; it is not merely
+   sufficient but better than colour.
+2. **The precise filter barely matters.** Literal Eq. (1) (0.9857) sits within 0.0011
+   of a proper high-pass (0.9868). Any DC-suppressing operator appears to do.
+3. **Retaining the colour branch dilutes rather than helps.** hfc (0.9868) < hfc_only
+   (0.9897).
+
+This *supports the paper's underlying hypothesis more strongly than the paper's own
+data does* — high frequencies really are where the forgery evidence lives — while
+contradicting its architecture, since the parallel colour+HFC fusion it proposes is
+worse than discarding colour. The greyscale control isolates point 2 further.
 
 ### 6.5 Robustness *(new)*
 
@@ -493,16 +526,30 @@ stricter splits, cross-dataset tests, degraded inputs — are where they should 
 
 ### 7.3 What the ablations suggest about the mechanism
 
-The paper attributes its gain to high-frequency content. Our ablations put that under
-strain: a filter that barely high-passes performs within 0.0011 AUC of a proper one,
-and a model given *only* high-pass residuals matches one given colour plus high-pass.
-The most economical explanation is that the two information sources are largely
-redundant here, and that part of the measured benefit comes from the two-branch
-architecture rather than the spectral content specifically.
+The paper attributes its gain to high-frequency content, and our ablations end up
+endorsing that thesis — while undermining the architecture built on it.
 
-This does not make the module useless — it works, and it is nearly free. But the
-*reason* it works may not be the reason the paper gives, and the paper's own ablation
-set is too small to distinguish the two. The missing control is the one we added.
+Our initial reading was that the benefit might be *architectural*: the literal form of
+Eq. (1), which leaves ~85% of the DC through, performs within 0.0011 AUC of a proper
+high-pass, suggesting the filtering was incidental and the extra branch was doing the
+work. `hfc_only` refutes that cleanly. It has no second branch — colour is discarded
+outright — yet it is the strongest configuration we trained (0.9897 AUC). A benefit
+that persists when the second branch is removed cannot be attributed to the second
+branch.
+
+What survives is a sharper claim than the paper's: high-frequency residuals carry the
+forgery evidence, the specific operator used to extract them is close to irrelevant,
+and **retaining the colour pathway alongside actively dilutes the result**. The
+paper's own Table III disagrees, ranking `hfc_only` last on both splits. We cannot
+explain the discrepancy from the text; the most likely candidates are its far longer
+training schedule (27k–40k iterations against our 4k), under which a colour-free model
+may overfit differently, or an implementation difference in how the per-channel
+residuals are stacked.
+
+The practical implication is awkward for the method as published: if the goal is
+accuracy on this benchmark, deleting the colour branch beats adding an HFC branch
+beside it, and costs nothing — `hfc_only` has exactly the plain backbone's parameter
+count.
 
 ### 7.4 Failure cases and limitations
 
@@ -538,9 +585,17 @@ Q10, but fragile to additive noise, inverting to −0.0412 at σ=10 — explaine
 injecting energy into precisely the band the operator reads. Replacing the paper's
 single hand-set band with a four-level Laplacian pyramid, or with filters learned under
 the Bayar–Stamm constraint of which Eq. (1) is one fixed member, improves balanced
-accuracy by 0.011 and 0.018 respectively for roughly 300 additional parameters. And a
-filter that barely high-passes performs within 0.0011 AUC of a proper one, which
-questions whether the paper's stated mechanism explains its own result.
+accuracy by 0.011 and 0.018 respectively for roughly 300 additional parameters.
+
+Most striking, we **reverse the paper's ablation ordering**. Its `hfc_only` setup —
+colour discarded, the backbone fed only high-pass residuals — is the weakest of three
+in the paper but the strongest configuration in our experiments, on both splits
+(0.9897 AUC on identity, against 0.9868 for the proposed colour+HFC fusion and 0.9779
+for the plain backbone). Since `hfc_only` has no second branch, this rules out the
+possibility that the gain is merely architectural, and it endorses the paper's
+spectral hypothesis more strongly than the paper's own results do. It simultaneously
+undermines the design built on that hypothesis: on this benchmark, deleting the colour
+pathway outperforms adding a high-frequency branch beside it, at no parameter cost.
 
 **Future work.** Repeat runs across seeds to put error bars on the sub-0.005 differences;
 evaluate under the strict component-based identity split already implemented; test
