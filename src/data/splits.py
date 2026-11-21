@@ -207,6 +207,73 @@ def build_splits(
     return manifest
 
 
+def identity_components(records: list[VideoRecord]) -> list[set[str]]:
+    """Connected components of the identity graph.
+
+    The paper says only that it puts "real and fake videos of the same person in
+    the same set", without saying what to do with a fake that involves TWO
+    people.  The strictest reading -- both identities must share a partition --
+    is only feasible if the graph (identities as nodes, fakes as edges) breaks
+    into several components.  Celeb-DF-v2 synthesises swaps across many pairs of
+    its 59 celebrities, so in practice this collapses into one giant component,
+    which would make a strict split impossible and forces a single-identity key.
+
+    Run this to confirm that for the actual data rather than assuming it.
+    """
+    parent: dict[str, str] = {}
+
+    def find(x: str) -> str:
+        parent.setdefault(x, x)
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a: str, b: str) -> None:
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[ra] = rb
+
+    for r in records:
+        if r.source_id:
+            find(r.source_id)
+        if r.target_id:
+            find(r.target_id)
+        if r.label == FAKE and r.source_id and r.target_id:
+            union(r.source_id, r.target_id)
+
+    groups: dict[str, set[str]] = defaultdict(set)
+    for ident in parent:
+        groups[find(ident)].add(ident)
+    return sorted(groups.values(), key=len, reverse=True)
+
+
+def describe_identity_graph(root: str | Path, include_youtube_real: bool = False) -> str:
+    """Report whether a strict both-identities-together split is possible."""
+    records = scan_dataset(root, include_youtube_real)
+    comps = identity_components(records)
+    n_ident = len({i for r in records for i in (r.source_id, r.target_id) if i})
+    biggest = len(comps[0]) if comps else 0
+
+    lines = [
+        f"identities={n_ident}  components={len(comps)}  largest={biggest}",
+        f"component sizes: {[len(c) for c in comps[:10]]}",
+    ]
+    if biggest == n_ident:
+        lines.append(
+            "=> ONE component: every identity is linked to every other through some\n"
+            "   fake, so requiring both identities of a fake to share a partition puts\n"
+            "   the whole dataset in one set. A strict split is impossible, and the\n"
+            "   paper must have keyed each video on a single identity."
+        )
+    else:
+        lines.append(
+            "=> Multiple components: a strict split IS possible by assigning whole\n"
+            "   components to partitions."
+        )
+    return "\n".join(lines)
+
+
 def summarise(manifest: dict) -> str:
     """Human-readable split summary, including the identity-leakage contrast."""
     lines = [

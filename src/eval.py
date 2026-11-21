@@ -27,9 +27,28 @@ from src.models.build import build_model
 
 
 def binary_metrics(scores: np.ndarray, labels: np.ndarray, threshold: float = 0.5) -> dict:
-    """Accuracy and ROC-AUC from sigmoid scores."""
+    """Accuracy, balanced accuracy and ROC-AUC from sigmoid scores.
+
+    `balanced_accuracy` -- the mean of the two per-class recalls -- matters here
+    because Celeb-DF-v2 is ~1:9.5 real:fake, so a test partition inherits that
+    imbalance and plain accuracy is dominated by the fake class.  Always
+    predicting "fake" scores ~0.917 on this data.
+
+    The paper reports 0.8834 accuracy for XceptionNet on the identity split,
+    which is BELOW that trivial baseline -- strong evidence its accuracies are
+    computed on balanced data.  `balanced_accuracy` is therefore the figure to
+    compare against the paper; `accuracy` is kept for completeness.
+    """
     preds = (scores >= threshold).astype(np.int64)
     acc = float((preds == labels).mean())
+
+    tp = int(((preds == 1) & (labels == 1)).sum())
+    fn = int(((preds == 0) & (labels == 1)).sum())
+    tn = int(((preds == 0) & (labels == 0)).sum())
+    fp = int(((preds == 1) & (labels == 0)).sum())
+    tpr = tp / (tp + fn) if (tp + fn) else float("nan")   # recall on fakes
+    tnr = tn / (tn + fp) if (tn + fp) else float("nan")   # recall on reals
+    balanced_acc = float((tpr + tnr) / 2)
 
     # AUC via the rank identity (equivalent to sklearn, no dependency needed).
     n_pos = int(labels.sum())
@@ -47,7 +66,17 @@ def binary_metrics(scores: np.ndarray, labels: np.ndarray, threshold: float = 0.
         ranks = (sums / counts)[inv]
         auc = float((ranks[labels == 1].sum() - n_pos * (n_pos + 1) / 2) / (n_pos * n_neg))
 
-    return {"accuracy": acc, "auc": auc, "n": int(len(labels))}
+    return {
+        "accuracy": acc,
+        "balanced_accuracy": balanced_acc,
+        "recall_fake": float(tpr),
+        "recall_real": float(tnr),
+        "auc": auc,
+        "n": int(len(labels)),
+        "n_real": int(tn + fp),
+        "n_fake": int(tp + fn),
+        "majority_baseline": float(max(tp + fn, tn + fp) / len(labels)),
+    }
 
 
 def aggregate_by_video(
@@ -118,8 +147,10 @@ def format_metrics(m: dict) -> str:
     parts = [f"loss={m['loss']:.4f}"]
     for level in ("frame", "video"):
         if level in m:
+            d = m[level]
             parts.append(
-                f"{level}: acc={m[level]['accuracy']:.4f} auc={m[level]['auc']:.4f}"
+                f"{level}: acc={d['accuracy']:.4f} bal_acc={d['balanced_accuracy']:.4f} "
+                f"auc={d['auc']:.4f}"
             )
     return "  ".join(parts)
 

@@ -100,6 +100,13 @@ def main(argv=None) -> int:
     ap.add_argument("--max-iters", type=int, default=0, help="0 = Table IV budget")
     ap.add_argument("--val-every", type=int, default=1000)
     ap.add_argument("--ckpt-every", type=int, default=1000)
+    ap.add_argument(
+        "--select-by", default="auc", choices=["loss", "auc"],
+        help="metric for choosing best.pt. Default 'auc' because that is what we "
+             "report: BCE loss punishes confident-but-wrong predictions, so it can "
+             "rise while ranking quality keeps improving, and selecting on loss then "
+             "discards the better model.",
+    )
     ap.add_argument("--patience", type=int, default=PAPER.lr_patience)
     ap.add_argument("--min-lr", type=float, default=PAPER.min_lr)
     ap.add_argument("--no-amp", action="store_true")
@@ -246,8 +253,13 @@ def main(argv=None) -> int:
                 }) + "\n")
             running, seen, t0 = 0.0, 0, time.time()
 
-            if metrics["loss"] < best_loss:
-                best_loss, best_iter, best_metrics = metrics["loss"], it, metrics
+            # Lower is better for loss, higher for AUC: score both as "lower wins".
+            score = (
+                metrics["loss"] if args.select_by == "loss"
+                else -metrics["frame"]["auc"]
+            )
+            if score < best_loss:
+                best_loss, best_iter, best_metrics = score, it, metrics
                 save_checkpoint(
                     best_ckpt, model=model.state_dict(), config=config,
                     iteration=it, metrics=metrics,
@@ -268,12 +280,15 @@ def main(argv=None) -> int:
     summary = {
         "run": run_name,
         "config": config,
+        "select_by": args.select_by,
         "best_iteration": best_iter,          # Table IV: iterations to convergence
         "best_val": best_metrics,
         "n_params": n_params,
     }
     (out / "summary.json").write_text(json.dumps(summary, indent=2))
-    print(f"\ndone: best val loss {best_loss:.4f} at iteration {best_iter}")
+    label = "val loss" if args.select_by == "loss" else "val frame AUC"
+    shown = best_loss if args.select_by == "loss" else -best_loss
+    print(f"\ndone: best {label} {shown:.4f} at iteration {best_iter}")
     print(f"  {format_metrics(best_metrics) if best_metrics else '(no validation ran)'}")
     print(f"  -> {out}")
     return 0
