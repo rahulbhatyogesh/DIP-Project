@@ -207,6 +207,82 @@ def build_splits(
     return manifest
 
 
+def make_strict_identity_split(
+    records: list[VideoRecord],
+    fracs: dict[str, float] | None = None,
+    seed: int = 42,
+) -> dict[str, list[str]]:
+    """Strictest reading of the paper: no identity appears in two partitions at all.
+
+    A fake links two subjects, so the constraint propagates: whole connected
+    components of the identity graph must move together.  On Celeb-DF-v2 the
+    graph has four components of sizes [38, 10, 10, 1], so this is feasible.
+
+    NOT the paper's protocol, though -- it is a stricter extension.  With 59
+    identities the paper's "21% for testing and 19% for validation" gives
+    round(59*0.21)=12 and round(59*0.19)=11, leaving 36 to train: exactly what
+    per-identity assignment (`make_identity_split`) yields.  Whole components
+    can only give 38/10/11, i.e. 18.6% and 16.9%, which the authors would not
+    have described as 21% and 19%.  So `make_identity_split` is the faithful
+    reproduction; this function is for asking what happens with zero leakage.
+
+    Unlike `make_identity_split`, a fake here is excluded from a partition if
+    EITHER of its identities belongs elsewhere, so there is no leakage through
+    the target subject's background, pose or hair.
+    """
+    fracs = fracs or DEFAULT_FRACS
+
+    comps = identity_components(records)
+    n = sum(len(c) for c in comps)
+    targets = {p: fracs[p] * n for p in ("train", "val", "test")}
+    assigned: dict[str, set[str]] = {p: set() for p in targets}
+
+    # Largest first, each to whichever partition is furthest below its target.
+    # Deterministic: `seed` is accepted only for symmetry with the other splits.
+    for comp in sorted(comps, key=len, reverse=True):
+        part = max(targets, key=lambda p: targets[p] - len(assigned[p]))
+        assigned[part] |= comp
+
+    part_of_ident = {i: p for p, idents in assigned.items() for i in idents}
+    out: dict[str, list[str]] = defaultdict(list)
+    for r in records:
+        idents = [i for i in (r.source_id, r.target_id) if i]
+        parts = {part_of_ident[i] for i in idents if i in part_of_ident}
+        if len(parts) == 1:
+            out[parts.pop()].append(r.video_id)
+        elif not parts:
+            out["train"].append(r.video_id)        # YouTube-real, no identity
+        # len(parts) > 1 cannot happen: linked identities share a component.
+    return {k: sorted(v) for k, v in out.items()}
+
+
+def records_from_manifest(manifest_csv: str | Path) -> list[VideoRecord]:
+    """Rebuild VideoRecords from an extraction manifest.
+
+    Lets splits be regenerated anywhere the face crops are (Colab, say) without
+    needing the 10 GB of source video.
+    """
+    import csv as _csv
+
+    seen: dict[str, VideoRecord] = {}
+    with Path(manifest_csv).open(newline="", encoding="utf-8") as fh:
+        for row in _csv.DictReader(fh):
+            vid = row["video_id"]
+            if vid in seen:
+                continue
+            seen[vid] = VideoRecord(
+                rel_path=f"{row['folder']}/{vid}.mp4",
+                video_id=vid,
+                folder=row["folder"],
+                label=int(row["label"]),
+                source_id=row["source_id"] or None,
+                target_id=row["target_id"] or None,
+            )
+    if not seen:
+        raise RuntimeError(f"no rows in {manifest_csv}")
+    return list(seen.values())
+
+
 def identity_components(records: list[VideoRecord]) -> list[set[str]]:
     """Connected components of the identity graph.
 

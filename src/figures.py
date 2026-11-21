@@ -249,20 +249,32 @@ PAPER_TABLE_III = {
 }
 
 
-def build_tables(results_dir: str | Path, level: str = "frame") -> str:
-    """Assemble Table III (ours vs paper) from a directory of results JSON."""
+def build_tables(
+    results_dir: str | Path,
+    level: str = "frame",
+    acc_key: str = "balanced_accuracy",
+) -> str:
+    """Assemble Table III (ours vs paper) from a directory of results JSON.
+
+    `acc_key` defaults to balanced accuracy, because Celeb-DF-v2 test partitions
+    are ~1:9.5 real:fake and raw accuracy is dominated by the fake class -- always
+    predicting "fake" scores ~0.917.  The paper's 0.8834 for XceptionNet on the
+    identity split is below that trivial baseline, which indicates its figures
+    are balanced.  Pass acc_key="accuracy" for the raw numbers.
+    """
     runs: dict[tuple, dict] = {}
     for p in sorted(Path(results_dir).glob("*.json")):
         r = json.loads(p.read_text())
         backbone, mode, protocol = r["run"].split("/")
         runs[(backbone, mode, protocol)] = r
 
+    acc_label = "bal_acc" if acc_key == "balanced_accuracy" else "acc"
     lines = [
-        "Table III -- ours vs paper  (level: " + level + ")",
+        f"Table III -- ours vs paper  (level: {level}, accuracy: {acc_key})",
         "",
         f"{'backbone':16s} {'setup':9s} {'split':9s} "
-        f"{'acc':>7s} {'(paper)':>8s} {'auc':>7s} {'(paper)':>8s}",
-        "-" * 70,
+        f"{acc_label:>8s} {'(paper)':>8s} {'auc':>7s} {'(paper)':>8s}",
+        "-" * 71,
     ]
     for key in PAPER_TABLE_III:
         backbone, mode, protocol = key
@@ -271,22 +283,37 @@ def build_tables(results_dir: str | Path, level: str = "frame") -> str:
         if r is None:
             lines.append(
                 f"{backbone:16s} {mode:9s} {protocol:9s} "
-                f"{'--':>7s} {p_acc:>8.4f} {'--':>7s} {p_auc:>8.4f}"
+                f"{'--':>8s} {p_acc:>8.4f} {'--':>7s} {p_auc:>8.4f}"
             )
             continue
         m = r[level]
         lines.append(
             f"{backbone:16s} {mode:9s} {protocol:9s} "
-            f"{m['accuracy']:>7.4f} {p_acc:>8.4f} {m['auc']:>7.4f} {p_auc:>8.4f}"
+            f"{m.get(acc_key, m['accuracy']):>8.4f} {p_acc:>8.4f} "
+            f"{m['auc']:>7.4f} {p_auc:>8.4f}"
         )
 
     # Table II: the identity-bias contrast, derived from the same runs.
-    lines += ["", "Table II -- identity bias (no-HFC rows)", ""]
+    lines += [
+        "",
+        f"Table II -- identity bias, no-HFC  ({acc_label} / auc)",
+        "",
+    ]
     for backbone in ("xception", "efficientnet_b4"):
+        got = {}
         for protocol in ("random", "identity"):
             r = runs.get((backbone, "none", protocol))
-            got = f"{r[level]['accuracy']:.4f} / {r[level]['auc']:.4f}" if r else "-- / --"
-            lines.append(f"  {backbone:16s} {protocol:9s}  {got}")
+            m = r[level] if r else None
+            got[protocol] = m
+            shown = f"{m.get(acc_key, m['accuracy']):.4f} / {m['auc']:.4f}" if m else "-- / --"
+            lines.append(f"  {backbone:16s} {protocol:9s}  {shown}")
+        if got["random"] and got["identity"]:
+            d_acc = (got["identity"].get(acc_key, 0) - got["random"].get(acc_key, 0))
+            d_auc = got["identity"]["auc"] - got["random"]["auc"]
+            lines.append(
+                f"  {'':16s} {'drop':9s}  {d_acc:+.4f} / {d_auc:+.4f}"
+                "   <- identity bias"
+            )
     return "\n".join(lines)
 
 
