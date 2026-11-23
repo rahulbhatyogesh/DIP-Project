@@ -27,19 +27,19 @@ CHROME_CANDIDATES = [
 ]
 
 CSS = """
-@page { size: A4; margin: 18mm 16mm; }
+@page { size: A4; margin: 15mm 14mm; }
 body {
   font-family: "Charter", "Georgia", "Times New Roman", serif;
-  font-size: 10.5pt; line-height: 1.5; color: #111; max-width: 100%;
+  font-size: 9.6pt; line-height: 1.38; color: #111; max-width: 100%;
 }
 h1 { font-size: 19pt; margin: 0 0 .2em; line-height: 1.25; }
-h2 { font-size: 13.5pt; margin: 1.6em 0 .5em; padding-bottom: .15em;
+h2 { font-size: 12.5pt; margin: 1.1em 0 .4em; padding-bottom: .12em;
      border-bottom: 1px solid #bbb; page-break-after: avoid; }
-h3 { font-size: 11.5pt; margin: 1.2em 0 .4em; page-break-after: avoid; }
+h3 { font-size: 10.6pt; margin: .85em 0 .3em; page-break-after: avoid; }
 p, li { orphans: 3; widows: 3; }
-table { border-collapse: collapse; width: 100%; margin: .9em 0;
-        font-size: 9pt; page-break-inside: avoid; }
-th, td { border: 1px solid #c6c6c6; padding: 4px 7px; text-align: left; }
+table { border-collapse: collapse; width: 100%; margin: .6em 0;
+        font-size: 8.2pt; page-break-inside: avoid; }
+th, td { border: 1px solid #c6c6c6; padding: 2.5px 5px; text-align: left; }
 th { background: #f0f0f0; font-weight: 600; }
 tr:nth-child(even) td { background: #fafafa; }
 code { font-family: "Consolas", "Menlo", monospace; font-size: 8.8pt;
@@ -49,8 +49,11 @@ pre { background: #f6f6f6; border: 1px solid #ddd; border-radius: 3px;
 pre code { background: none; padding: 0; font-size: 8.4pt; line-height: 1.35; }
 blockquote { border-left: 3px solid #ccc; margin-left: 0; padding-left: 12px;
              color: #444; }
-hr { border: none; border-top: 1px solid #ddd; margin: 1.6em 0; }
-img { max-width: 100%; page-break-inside: avoid; }
+hr { border: none; border-top: 1px solid #ddd; margin: 1.0em 0; }
+img { max-width: 100%; max-height: 74mm; display: block; margin: .4em auto;
+      page-break-inside: avoid; }
+p > img + em, figure em { font-size: 8.6pt; }
+hr + h2 { margin-top: .5em; }
 strong { font-weight: 650; }
 """
 
